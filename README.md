@@ -12,6 +12,8 @@ Currently supports snapshoting and restoring of multischema PL/SQL apps containi
 - triggers
 - synonyms
 
+User with **plsnap** deployed has to have really strong privileges - **DBA** role is the bestest. Otherwise you have to grant explicitly privileges on objects owned by `SYS`, as these cannot be granted even with `grant any object privilege` (read docs for detailed info)
+
 # API
 
 ## createSnapshotDefinition
