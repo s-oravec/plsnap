@@ -1,10 +1,51 @@
 create or replace package body plsnap_impl as
 
-    gc_PARTTYPE_INDEXES    constant varchar2(7) := 'INDEXES';
-    gc_PARTTYPE_PRIVILEGES constant varchar2(10) := 'PRIVILEGES';
-    gc_PARTTYPE_DATA       constant varchar2(4) := 'DATA';
-    gc_PARTTYPE_MAIN       constant varchar2(4) := 'MAIN';
-    gc_PARTTYPE_ALTER      constant varchar2(5) := 'ALTER';
+    gc_SNAPSTAT_ERROR constant varchar2(5) := 'ERROR';
+    gc_SNAPSTAT_CREATING constant varchar2(8) := 'CREATING';
+    gc_SNAPSTAT_OK constant varchar2(2) := 'OK';
+    
+    gc_TRANSPAR_BODY constant varchar2(4) := 'BODY';
+    gc_TRANSPAR_CSTRS constant varchar2(11) := 'CONSTRAINTS';
+    gc_TRANSPAR_CSTRS_AS_ALTER constant varchar2(20) := 'CONSTRAINTS_AS_ALTER';
+    gc_TRANSPAR_EMIT_SCHEMA constant varchar2(11) := 'EMIT_SCHEMA';
+    gc_TRANSPAR_FORCE constant varchar2(5) := 'FORCE';
+    gc_TRANSPAR_PRETTY constant varchar2(6) := 'PRETTY';
+    gc_TRANSPAR_REF_CSTRS constant varchar2(15) := 'REF_CONSTRAINTS';
+    gc_TRANSPAR_SECIFICATION constant varchar2(13) := 'SPECIFICATION';
+    gc_TRANSPAR_SEGMENT_ATTRS constant varchar2(18) := 'SEGMENT_ATTRIBUTES';
+    gc_TRANSPAR_SQLTERMINATOR constant varchar2(13) := 'SQLTERMINATOR';
+    gc_TRANSPAR_STORAGE constant varchar2(7) := 'STORAGE';
+    gc_TRANSPAR_TABLESPACE constant varchar2(10) := 'TABLESPACE';
+
+    gc_OBJTP_COL_PRIV constant varchar2(8) := 'COL_PRIV';
+    gc_OBJTP_DB_LINK constant varchar2(13) := 'DATABASE LINK';
+    gc_OBJTP_DIRECTORY constant varchar2(9) := 'DIRECTORY';
+    gc_OBJTP_FUNCTION constant varchar2(8) := 'FUNCTION';
+    gc_OBJTP_INDEX constant varchar2(5) := 'INDEX';
+    gc_OBJTP_LOB constant varchar2(3) := 'LOB';
+    gc_OBJTP_PACKAGE constant varchar2(7) := 'PACKAGE';
+    gc_OBJTP_PACKAGE_BODY constant varchar2(12) := 'PACKAGE BODY';
+    gc_OBJTP_PROCEDURE constant varchar2(9) := 'PROCEDURE';
+    gc_OBJTP_SEQUENCE constant varchar2(8) := 'SEQUENCE';
+    gc_OBJTP_SYNONYM constant varchar2(7) := 'SYNONYM';
+    gc_OBJTP_SYS_PRIV constant varchar2(8) := 'SYS_PRIV';
+    gc_OBJTP_TAB_PRIV constant varchar2(8) := 'TAB_PRIV';
+    gc_OBJTP_TABLE constant varchar2(5) := 'TABLE';
+    gc_OBJTP_TRIGGER constant varchar2(7) := 'TRIGGER';
+    gc_OBJTP_TYPE constant varchar2(4) := 'TYPE';
+    gc_OBJTP_TYPE_BODY constant varchar2(9) := 'TYPE BODY';
+    gc_OBJTP_VIEW constant varchar2(4) := 'VIEW';
+
+    gc_PARTTYPE_ALTER       constant varchar2(5) := 'ALTER';
+    gc_PARTTYPE_DATA        constant varchar2(4) := 'DATA';
+    gc_PARTTYPE_FOREIGN_KEY constant varchar2(11) := 'FOREIGN KEY';
+    gc_PARTTYPE_CHECK       constant varchar2(5) := 'CHECK';
+    gc_PARTTYPE_INDEXES     constant varchar2(7) := 'INDEXES';
+    gc_PARTTYPE_MAIN        constant varchar2(4) := 'MAIN';
+    gc_PARTTYPE_PRIMARY_KEY constant varchar2(11) := 'PRIMARY KEY';
+    gc_PARTTYPE_PRIVILEGES  constant varchar2(10) := 'PRIVILEGES';
+    gc_PARTTYPE_UNIQUE      constant varchar2(6) := 'UNIQUE';
+    
 
     subtype typ_ObjectRecord is dba_objects%rowtype;
     type typ_MetadataTab is table of plsnap_Metadata%rowtype;
@@ -19,6 +60,12 @@ create or replace package body plsnap_impl as
     pragma exception_init(e_partition_does_not_exist, -2149);
     gc_MAX_ITERATIONS constant pls_integer := 20;
 
+
+    ----------------------------------------------------------------------------
+    procedure log(a_message in varchar2) is
+    begin
+        dbms_output.put_line('.. ' || a_message);
+    end;
 
     ----------------------------------------------------------------------------  
     function getDataTableName(a_idMetadata in plsnap_Metadata.idMetadata%type) return varchar2 is
@@ -41,11 +88,17 @@ create or replace package body plsnap_impl as
     begin
         -- NoFormat Start
         return a_object.object_type not like '%PARTITION'
-           and a_object.object_type not IN('LOB', 'DATABASE LINK')
+           and a_object.object_type not IN(gc_OBJTP_LOB, gc_OBJTP_DB_LINK)
            and a_object.object_name not like 'BIN$%'
            and a_object.generated != 'Y' -- no IOTs and stuff
         ;
         -- NoFormat End
+    end;
+    
+    ----------------------------------------------------------------------------
+    procedure set_sessionTransformParam(a_paramName in varchar2, a_enable in boolean) is
+    begin
+        dbms_metadata.set_transform_param(dbms_metadata.session_transform, a_paramName, a_enable);
     end;
 
     ----------------------------------------------------------------------------
@@ -58,8 +111,8 @@ create or replace package body plsnap_impl as
         l_startWith integer;
     begin
         -- get ddl - in which START with is "rounded" to multiple of sequence CACHE
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', false);
-        l_clob := dbms_metadata.get_ddl('SEQUENCE', a_objectName, a_schemaName);
+        set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, false);
+        l_clob := dbms_metadata.get_ddl(gc_OBJTP_SEQUENCE, a_objectName, a_schemaName);
         -- and fix it - change it to START with nextVal
         execute immediate 'select ' || a_schemaName || '.' || a_objectName || '.nextval from dual'
             into l_startWith;
@@ -69,7 +122,7 @@ create or replace package body plsnap_impl as
         when others then
             reraise('Unexpected error in plsnap_impl.get_sequenceDdl');
     end;
-
+    
     ----------------------------------------------------------------------------
     function get_ddl
     (
@@ -79,29 +132,29 @@ create or replace package body plsnap_impl as
     ) return clob is
     begin
         case
-            when a_objectType in ('VIEW', 'SYNONYM', 'PROCEDURE', 'FUNCTION') then
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', false);
+            when a_objectType in (gc_OBJTP_VIEW, gc_OBJTP_SYNONYM, gc_OBJTP_PROCEDURE, gc_OBJTP_FUNCTION) then
+                set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, false);
                 return dbms_metadata.get_ddl(a_objectType, a_objectName, a_schemaName);
-            when a_objectType = 'TABLE' then
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', true);
+            when a_objectType = gc_OBJTP_TABLE then
+                set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, true);
                 return dbms_metadata.get_ddl(a_objectType, a_objectName, a_schemaName);
-            when a_objectType = 'INDEX' then
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', true);
+            when a_objectType = gc_OBJTP_INDEX then
+                set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, true);
                 return dbms_metadata.get_ddl(a_objectType, a_objectName, a_schemaName);
-            when a_objectType = 'SEQUENCE' then
+            when a_objectType = gc_OBJTP_SEQUENCE then
                 return get_sequenceDdl(a_schemaName, a_objectName);
-            when a_objectType = 'TRIGGER' then
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', false);
+            when a_objectType = gc_OBJTP_TRIGGER then
+                set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, false);
                 return dbms_metadata.get_ddl(a_objectType, a_objectName, a_schemaName);
-            when a_objectType in ('PACKAGE', 'TYPE') then
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', false);
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SPECIFICATION', true);
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'BODY', false);
+            when a_objectType in (gc_OBJTP_PACKAGE, gc_OBJTP_TYPE) then
+                set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, false);
+                set_sessionTransformParam(gc_TRANSPAR_SECIFICATION, true);
+                set_sessionTransformParam(gc_TRANSPAR_BODY, false);
                 return dbms_metadata.get_ddl(a_objectType, a_objectName, a_schemaName);
-            when a_objectType in ('PACKAGE BODY', 'TYPE BODY') then
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', false);
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SPECIFICATION', false);
-                dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'BODY', true);
+            when a_objectType in (gc_OBJTP_PACKAGE_BODY, gc_OBJTP_TYPE_BODY) then
+                set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, false);
+                set_sessionTransformParam(gc_TRANSPAR_SECIFICATION, false);
+                set_sessionTransformParam(gc_TRANSPAR_BODY, true);
                 return dbms_metadata.get_ddl(regexp_substr(a_objectType, '[^ ]+', 1, 1), a_objectName, a_schemaName);
             else
                 raise_application_error(-20000, a_objectType || ' is not supported, yet');
@@ -123,7 +176,7 @@ create or replace package body plsnap_impl as
         select a_idSnapshot,
                a_schemaName,
                privilege,
-               'SYS_PRIV',
+               gc_OBJTP_SYS_PRIV,
                'VALID',
                1,
                gc_PARTTYPE_MAIN,
@@ -164,13 +217,13 @@ create or replace package body plsnap_impl as
         select a_idSnapshot,
                a_schemaName,
                type || ':' || owner || ':' || table_name || ':grantable=' || grantable || ':hierarchy=' || hierarchy,
-               'TAB_PRIV',
+               gc_OBJTP_TAB_PRIV,
                'VALID',
                1,
                gc_PARTTYPE_MAIN,
                'GRANT '
                || privilege || ' on '
-               || case type when 'DIRECTORY' then ' DIRECTORY ' end
+               || case type when gc_OBJTP_DIRECTORY then ' DIRECTORY ' end
                || owner || '.' || table_name
                || ' TO ' || grantee
                || case grantable when 'YES' then ' with GRANT OPTION ' end
@@ -200,7 +253,7 @@ create or replace package body plsnap_impl as
                    priv.column_name,
                    priv.grantable,
                    listagg(priv.privilege, ',') within group(order by priv.privilege) as privilege
-              from dba_col_privs priv
+              from (select distinct grantee, owner, table_name, column_name, privilege, grantable from dba_col_privs) priv
              inner join dba_objects obj on (obj.owner = priv.owner and obj.object_name = priv.TABLE_NAME)
              where priv.grantee = a_schemaName
                and priv.table_name not like 'BIN$%'
@@ -210,7 +263,7 @@ create or replace package body plsnap_impl as
         select a_idSnapshot,
                a_schemaName,
                type || ':' || owner || ':' || table_name || ':' || column_name || ':grantable=' || grantable,
-               'COL_PRIV',
+               gc_OBJTP_COL_PRIV,
                'VALID',
                1,
                gc_PARTTYPE_MAIN,
@@ -270,7 +323,7 @@ create or replace package body plsnap_impl as
         a_idMetadata in integer default null
     ) is
     begin
-        logForObject(a_comments, a_schemaName, a_objectName, a_objectType, a_idMetadata, 'ERROR');
+        logForObject(a_comments, a_schemaName, a_objectName, a_objectType, a_idMetadata, gc_SNAPSTAT_ERROR);
     exception
         when others then
             reraise('Unexpected error in plsnap_impl.logErrorForObject');
@@ -283,7 +336,7 @@ create or replace package body plsnap_impl as
         a_metadata in plsnap_Metadata%rowtype
     ) is
     begin
-        logForObject(a_comments, a_metadata.schemaName, a_metadata.objectName, a_metadata.objectType, a_metadata.idMetadata, 'ERROR');
+        logForObject(a_comments, a_metadata.schemaName, a_metadata.objectName, a_metadata.objectType, a_metadata.idMetadata, gc_SNAPSTAT_ERROR);
     exception
         when others then
             reraise('Unexpected error in plsnap_impl.logWarningForObject');
@@ -379,31 +432,33 @@ create or replace package body plsnap_impl as
                     --
                     l_partType := gc_PARTTYPE_MAIN;
                     -- TODO: refactor - split into more methods
-                    if l_object.object_type in ('TABLE', 'INDEX') then
+                    if l_object.object_type in (gc_OBJTP_TABLE, gc_OBJTP_INDEX) then
                         l_ddl := get_ddl(a_schemaName, l_object.object_name, l_object.object_type);
                         -- split at terminator in more parts
                         for l_part in 1 .. regexp_count(l_ddl, ';') loop
                             -- extract part
                             l_ddlPart := regexp_substr(l_ddl, '[^;]+', 1, l_part);
                             --
-                            if l_part != 1 and l_object.object_type = 'TABLE' then
+                            if l_part != 1 and l_object.object_type = gc_OBJTP_TABLE then
                                 -- NoFormat Start
                                 l_partName := cast(regexp_substr(l_ddlPart, 'ALTER TABLE (".*?"\.".*?") ADD CONSTRAINT "(.*?)"', 1, 1, null, 2) as varchar2);
                                 -- NoFormat End
                                 if l_ddlPart like '%FOREIGN KEY%' then
-                                    l_partType := 'FOREIGN KEY';
+                                    l_partType := gc_PARTTYPE_FOREIGN_KEY;
                                 elsif l_ddlPart like '%PRIMARY KEY%' then
-                                    l_partType := 'PRIMARY KEY';
+                                    l_partType := gc_PARTTYPE_PRIMARY_KEY;
                                 elsif l_ddlPart like '% UNIQUE %' then
-                                    l_partType := 'UNIQUE';
+                                    l_partType := gc_PARTTYPE_UNIQUE;
                                 elsif l_ddlPart like '% CHECK %' then
-                                    l_partType := 'CHECK';
+                                    l_partType := gc_PARTTYPE_CHECK;
                                 end if;
+                            elsif l_part != 1 and l_object.object_type != gc_OBJTP_TABLE then
+                                l_partType := gc_PARTTYPE_ALTER;  
                             end if;
                             -- store metadata
                             l_idMetadataDummy := storeMetadata(l_ddlPart, l_part);
                             --
-                            if l_part = 1 and l_object.object_type = 'TABLE' then
+                            if l_part = 1 and l_object.object_type = gc_OBJTP_TABLE then
                                 l_ddlPart := null;
                                 -- create virtual parts
                                 -- data
@@ -416,7 +471,7 @@ create or replace package body plsnap_impl as
                             end if;
                             --
                         end loop;
-                    elsif l_object.object_type in ('TRIGGER') then
+                    elsif l_object.object_type in (gc_OBJTP_TRIGGER) then
                         declare
                             l_body              clob;
                             l_enableStmt        clob;
@@ -444,7 +499,7 @@ create or replace package body plsnap_impl as
                         l_idMetadataDummy := storeMetadata(l_ddl, 1);
                     end if;
                     -- privileges
-                    if l_object.object_type in ('TABLE', 'VIEW', 'PACKAGE', 'TYPE', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'SYNONYM') then
+                    if l_object.object_type in (gc_OBJTP_TABLE, gc_OBJTP_VIEW, gc_OBJTP_PACKAGE, gc_OBJTP_TYPE, gc_OBJTP_PROCEDURE, gc_OBJTP_FUNCTION, gc_OBJTP_SEQUENCE, gc_OBJTP_SYNONYM) then
                         -- privileges
                         l_partName        := null;
                         l_partType        := gc_PARTTYPE_PRIVILEGES;
@@ -489,7 +544,7 @@ create or replace package body plsnap_impl as
                          and dep.referenced_name = tgt.objectName
                          and dep.referenced_type = tgt.objectType)
         ;
-        dbms_output.put_line('INFO> object -> object.privileges ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> object -> object.privileges ='|| sql%rowcount);
         -- FKey -> PKey/UKey dependencies
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -500,7 +555,7 @@ create or replace package body plsnap_impl as
                      kcstr.owner as schemaNameReferenced,
                      kcstr.table_name as objectNameReferenced,
                      kcstr.constraint_name as partNameReferenced,
-                     decode(kcstr.constraint_type, 'P', 'PRIMARY KEY', 'U', 'UNIQUE') as partTypeReferenced
+                     decode(kcstr.constraint_type, 'P', gc_PARTTYPE_PRIMARY_KEY, 'U', gc_PARTTYPE_UNIQUE) as partTypeReferenced
                 from plsnap_Snapshot snap
                inner join plsnap_Schema snapSchm on (snapSchm.idDefinition = snap.idDefinition)
                inner join dba_constraints rcstr on (rcstr.owner = snapSchm.name and rcstr.constraint_type = 'R')
@@ -522,9 +577,9 @@ create or replace package body plsnap_impl as
                          and tgt.partName = deps.partNameReferenced
                          and tgt.partType = deps.partTypeReferenced)
              where src.idSnapshot = a_idSnapshot
-               and src.partType = 'FOREIGN KEY'
+               and src.partType = gc_PARTTYPE_FOREIGN_KEY
         ;
-        dbms_output.put_line('INFO> FKey -> PKey/UKey dependencies ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> FKey -> PKey/UKey dependencies ='|| sql%rowcount);
         -- privilege -> table
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -537,10 +592,10 @@ create or replace package body plsnap_impl as
                          and tgt.schemaName = regexp_substr(src.objectName, '[^:]+', 1, 2)
                          and tgt.objectName = regexp_substr(src.objectName, '[^:]+', 1, 3)
                          and tgt.objectType = regexp_substr(src.objectName, '[^:]+', 1, 1))
-             where src.objectType in ('TAB_PRIV', 'COL_PRIV')
+             where src.objectType in (gc_OBJTP_TAB_PRIV, gc_OBJTP_COL_PRIV)
                and src.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> privilege -> table ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> privilege -> table ='|| sql%rowcount);
         -- privileges group -> privilege
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -552,10 +607,10 @@ create or replace package body plsnap_impl as
                          and src.schemaName = regexp_substr(tgt.objectName, '[^:]+', 1, 2)
                          and src.objectName = regexp_substr(tgt.objectName, '[^:]+', 1, 3)
                          and src.objectType = regexp_substr(tgt.objectName, '[^:]+', 1, 1))
-             where tgt.objectType in ('TAB_PRIV', 'COL_PRIV')
+             where tgt.objectType in (gc_OBJTP_TAB_PRIV, gc_OBJTP_COL_PRIV)
                and tgt.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> privileges group -> privilege ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> privileges group -> privilege ='|| sql%rowcount);
         -- \a index -> table
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -568,13 +623,13 @@ create or replace package body plsnap_impl as
                     on (tgt.idSnapshot = a_idSnapshot
                         and tgt.schemaName = ind.table_owner
                         and tgt.objectName = ind.table_name
-                        and tgt.objectType = 'TABLE'
+                        and tgt.objectType = gc_OBJTP_TABLE
                         -- partType = gc_PARTTYPE_MAIN
                         and tgt.part = 1)
-             where src.objectType = 'INDEX'
+             where src.objectType = gc_OBJTP_INDEX
                and src.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> index -> table ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> index -> table ='|| sql%rowcount);
         -- indexes -> \a index
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -587,14 +642,14 @@ create or replace package body plsnap_impl as
                     on (tgt.idSnapshot = a_idSnapshot
                         and tgt.schemaName = ind.owner
                         and tgt.objectName = ind.index_name
-                        and tgt.objectType = 'INDEX'
+                        and tgt.objectType = gc_OBJTP_INDEX
                         -- partType = gc_PARTTYPE_MAIN
                         and tgt.part = 1)
-             where src.objectType = 'TABLE'
+             where src.objectType = gc_OBJTP_TABLE
                and src.partType = gc_PARTTYPE_INDEXES
                and src.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> indexs -> index ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> indexs -> index ='|| sql%rowcount);
         -- data -> indexes
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -604,13 +659,13 @@ create or replace package body plsnap_impl as
                      on (tgt.idSnapshot = a_idSnapshot
                          and tgt.schemaName = src.schemaName
                          and tgt.objectName = src.objectName
-                         and tgt.objectType = 'TABLE'
+                         and tgt.objectType = gc_OBJTP_TABLE
                          and tgt.partType = gc_PARTTYPE_INDEXES)
-             where src.objectType = 'TABLE'
+             where src.objectType = gc_OBJTP_TABLE
                and src.partType = gc_PARTTYPE_DATA
                and src.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> data -> indexes ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> data -> indexes ='|| sql%rowcount);
         -- constraints -> data
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -622,10 +677,10 @@ create or replace package body plsnap_impl as
                          and tgt.objectName = src.objectName
                          and tgt.objectType = src.objectType
                          and tgt.partType = gc_PARTTYPE_DATA)
-             where src.partType in ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY', 'CHECK')
+             where src.partType in (gc_PARTTYPE_PRIMARY_KEY, gc_PARTTYPE_UNIQUE, gc_PARTTYPE_FOREIGN_KEY, gc_PARTTYPE_CHECK)
                and src.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> constraints -> data ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> constraints -> data ='|| sql%rowcount);
         -- privileges -> object
         insert into plsnap_MetadataDependency
             (idmetadata, idMetadataReferenced)
@@ -638,10 +693,10 @@ create or replace package body plsnap_impl as
                          and tgt.objectType = src.objectType
                          -- partType = gc_PARTTYPE_MAIN
                          and tgt.part = 1)
-             where src.partType  = 'PRIVILEGES'
+             where src.partType  = gc_PARTTYPE_PRIVILEGES
                and src.idSnapshot = a_idSnapshot
         ;
-        dbms_output.put_line('INFO> privileges -> object ='|| sql%rowcount);
+        -- dbms_output.put_line('INFO> privileges -> object ='|| sql%rowcount);
         -- NoFormat End
     exception
         when others then
@@ -687,7 +742,7 @@ create or replace package body plsnap_impl as
         for l_metadata in (select *
                              from plsnap_Metadata
                             where idSnapshot = a_idSnapshot
-                              and ObjectType = 'TABLE'
+                              and ObjectType = gc_OBJTP_TABLE
                               and partType = gc_PARTTYPE_DATA) loop
             declare
                 l_Cnt integer;
@@ -783,7 +838,7 @@ create or replace package body plsnap_impl as
                 transformToModify(a_metadata, 'RELY');
                 --
             when e_name_already_used then
-                if a_metadata.objectType = 'INDEX' then
+                if a_metadata.objectType = gc_OBJTP_INDEX then
                     -- there is PKey UKey with same name - eat exception
                     null;
                 else
@@ -791,7 +846,7 @@ create or replace package body plsnap_impl as
                 end if;
             when e_success_with_comp_error then
                 if a_metadata.objectStatus = 'VALID' then
-                    if a_metadata.objectType = 'VIEW' then
+                    if a_metadata.objectType = gc_OBJTP_VIEW then
                         -- TODO: follow dependencies over synonym (add dependency) -> db link, as it my be local and part of snapshot definition)
                         logWarningForObject(null, a_metadata);
                     else
@@ -802,7 +857,7 @@ create or replace package body plsnap_impl as
                     null;
                 end if;
             when e_partition_does_not_exist then
-                if a_metadata.objectType = 'INDEX' and a_metadata.ddl like '%ALTER INDEX%' then
+                if a_metadata.objectType = gc_OBJTP_INDEX and a_metadata.ddl like '%ALTER INDEX%' then
                     -- log warning and then
                     logWarningForObject(null, a_metadata);
                 else
@@ -836,7 +891,6 @@ create or replace package body plsnap_impl as
 
     ----------------------------------------------------------------------------
     procedure loadData(a_metadata in plsnap_Metadata%rowtype) is
-        l_Cnt integer;
     begin
         if a_metadata.hasData = 'Y' then
             -- TODO: disable indexes to increase performance
@@ -887,7 +941,7 @@ create or replace package body plsnap_impl as
         ltab_objectsToCreate := getObjectsWOUnmetDeps(a_Snapshot.idSnapshot);
         while (ltab_objectsToCreate.count > 0 and l_iteration < gc_MAX_ITERATIONS) loop
             --
-            dbms_output.put_line('-- iteration ' || l_iteration || ' objectsToCreate.count=' || ltab_objectsToCreate.count);
+            -- watch! dbms_output.put_line('-- iteration ' || l_iteration || ' objectsToCreate.count=' || ltab_objectsToCreate.count);
             for l_idx in 1 .. ltab_objectsToCreate.count loop
                 recreateObject(ltab_objectsToCreate(l_idx));
             end loop;
@@ -897,7 +951,6 @@ create or replace package body plsnap_impl as
             l_iteration            := l_iteration + 1;
             --
         end loop;
-        dbms_output.put_line('done');
     exception
         when others then
             reraise('Unexpected error in plsnap_impl.recreateObjects');
@@ -907,18 +960,19 @@ create or replace package body plsnap_impl as
     procedure drop_objects(p_schemaName in plsnap_Schema.name%type) is
         l_failed boolean := false;
     begin
-        for cmd in (select 'drop ' || object_type || ' "' || owner || '"."' || object_name || '"' || case object_type
-                               when 'TABLE' then
+        for cmd in (select 'drop ' || object_type || ' "' || owner || '"."' || object_name || '"' || 
+                           case object_type
+                               when gc_OBJTP_TABLE then
                                 ' cascade constraints purge'
-                               when 'TYPE' then
-                                ' FORCE'
+                               when gc_OBJTP_TYPE then
+                                ' force'
                            end as text,
                            owner,
                            object_type,
                            object_name
                       from dba_objects
                      where owner = p_schemaName
-                       and object_type in ('TABLE', 'PACKAGE', 'SEQUENCE', 'VIEW', 'PROCEDURE', 'TYPE', 'SYNONYM', 'FUNCTION')
+                       and object_type in (gc_OBJTP_TABLE, gc_OBJTP_PACKAGE, gc_OBJTP_SEQUENCE, gc_OBJTP_VIEW, gc_OBJTP_PROCEDURE, gc_OBJTP_TYPE, gc_OBJTP_SYNONYM, gc_OBJTP_FUNCTION)
                        and object_name not like 'SYS_IOT%'
                      order by object_type, object_name) loop
             begin
@@ -936,7 +990,7 @@ create or replace package body plsnap_impl as
                            object_name
                       from dba_objects
                      where owner = p_schemaName
-                       and object_type in ('PACKAGE BODY', 'TYPE BODY')
+                       and object_type in (gc_OBJTP_PACKAGE_BODY, gc_OBJTP_TYPE_BODY)
                      order by object_type, object_name) loop
             begin
                 execute immediate cmd.text;
@@ -964,10 +1018,17 @@ create or replace package body plsnap_impl as
     procedure createSnapshotDefinition(a_definitionName in plsnap_Definition.name%type) is
         pragma autonomous_transaction;
     begin
+        --
+        log('Creating Snapshot Definition definitionName=' || a_definitionName);
+        --
         insert into plsnap_Definition (name) values (a_definitionName) ;
         commit;
+        --
+        log('done');
+        --
     exception
         when others then
+            log('failed');
             reraise('Unexpected error in plsnap_impl.createSnapshotDefinition');
     end;
 
@@ -977,6 +1038,8 @@ create or replace package body plsnap_impl as
         pragma autonomous_transaction;
         lrec_Definition plsnap_Definition%rowtype;
     begin
+        --
+        log('Dropping Snapshot Definition definitionName=' || a_definitionName);
         -- validate definition name
         select * into lrec_Definition from plsnap_Definition where name = a_definitionName;      
         -- drop all snapshots based on definition
@@ -986,8 +1049,12 @@ create or replace package body plsnap_impl as
         -- delete definition
         delete from plsnap_Definition where name = a_definitionName;
         commit;
+        --
+        log('done');
+        --
     exception
         when others then
+            log('failed');
             reraise('Unexpected error in plsnap_impl.dropSnapshotDefinition');
     end;
 
@@ -1000,13 +1067,19 @@ create or replace package body plsnap_impl as
         pragma autonomous_transaction;
         lrec_Definition plsnap_Definition%rowtype;
     begin
+        --
+        log('Adding Schema schemaName=' || a_schemaName || ' into Snapshot Definition definitionName=' || a_definitionName);
         -- validate definition name
         select * into lrec_Definition from plsnap_Definition where name = a_definitionName;
         -- and insert
         insert into plsnap_Schema (idDefinition, name) values (lrec_Definition.idDefinition, a_schemaName);
         commit;
+        --
+        log('done');
+        --
     exception
         when others then
+            log('failed');
             reraise('Unexpected error in plsnap_impl.addSchema');
     end;
 
@@ -1020,13 +1093,19 @@ create or replace package body plsnap_impl as
         pragma autonomous_transaction;
         lrec_Definition plsnap_Definition%rowtype;
     begin
+        --
+        log('Dropping Schema schemaName=' || a_schemaName || ' from Snapshot Definition definitionName=' || a_definitionName);
         -- validate definition name
         select * into lrec_Definition from plsnap_Definition where name = a_definitionName;
         -- and delete
         delete from plsnap_Schema where idDefinition = lrec_Definition.idDefinition and name = a_schemaName;
         commit;
+        --
+        log('done');
+        --
     exception
         when others then
+            log('failed');
             reraise('Unexpected error in plsnap_impl.dropSchema');
     end;
 
@@ -1041,6 +1120,8 @@ create or replace package body plsnap_impl as
         l_newIdSnapshot plsnap_Snapshot.idSnapshot%type;
         lrec_Definition plsnap_Definition%rowtype;
     begin
+        --
+        log('Creating Snapshot snapshotName=' || a_snapshotName || ' for Snapshot Definition definitionName=' || a_definitionName);
         -- validate definition name
         select * into lrec_Definition from plsnap_Definition where name = a_definitionName;
         -- store into row in table
@@ -1048,7 +1129,7 @@ create or replace package body plsnap_impl as
             insert into plsnap_Snapshot
                 (idDefinition, name, tsStatusChange, status)
             values
-                (lrec_Definition.idDefinition, a_snapshotName, systimestamp, 'CREATING')
+                (lrec_Definition.idDefinition, a_snapshotName, systimestamp, gc_SNAPSTAT_CREATING)
             returning idSnapshot into l_newIdSnapshot;
             commit;
         exception
@@ -1056,29 +1137,32 @@ create or replace package body plsnap_impl as
                 raise_application_error(-20000, 'Snapshot name="' || a_snapshotName || '" already exists.');
         end;
         -- initial dbms_metadata settings
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'PRETTY', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'FORCE', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SEGMENT_ATTRIBUTES', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'STORAGE', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'TABLESPACE', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'EMIT_SCHEMA', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'REF_CONSTRAINTS', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'CONSTRAINTS', true);
-        dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'CONSTRAINTS_AS_ALTER', true);
+        set_sessionTransformParam(gc_TRANSPAR_SQLTERMINATOR, true);
+        set_sessionTransformParam(gc_TRANSPAR_PRETTY, true);
+        set_sessionTransformParam(gc_TRANSPAR_FORCE, true);
+        set_sessionTransformParam(gc_TRANSPAR_SEGMENT_ATTRS, true);
+        set_sessionTransformParam(gc_TRANSPAR_STORAGE, true);
+        set_sessionTransformParam(gc_TRANSPAR_TABLESPACE, true);
+        set_sessionTransformParam(gc_TRANSPAR_EMIT_SCHEMA, true);
+        set_sessionTransformParam(gc_TRANSPAR_REF_CSTRS, true);
+        set_sessionTransformParam(gc_TRANSPAR_CSTRS, true);
+        set_sessionTransformParam(gc_TRANSPAR_CSTRS_AS_ALTER, true);
         -- populate metadata
         populateMetadata(l_newIdSnapshot);
         -- populate data
         populateData(l_newIdSnapshot);
         --
-        update plsnap_Snapshot set Status = 'OK' where idSnapshot = l_newIdSnapshot;
+        update plsnap_Snapshot set Status = gc_SNAPSTAT_OK where idSnapshot = l_newIdSnapshot;
         commit;
+        --
+        log('done');
         --
     exception
         when others then
+            log('failed');
             rollback;
             if l_newIdSnapshot is not null then
-                update plsnap_Snapshot set Status = 'ERROR' where idSnapshot = l_newIdSnapshot;
+                update plsnap_Snapshot set Status = gc_SNAPSTAT_ERROR where idSnapshot = l_newIdSnapshot;
                 commit;
             end if;
             reraise('Unexpected error in plsnap_impl.createSnapshot');
@@ -1090,13 +1174,14 @@ create or replace package body plsnap_impl as
         l_idSnapshot plsnap_Snapshot.idSnapshot%type;
         l_tableName  user_tables.table_name%type;
     begin
+        log('Dropping snapshot snapshotName=' || a_snapshotName);
         -- get snapshot by name
         select idSnapshot into l_idSnapshot from plsnap_Snapshot where name = a_snapshotName;
         -- drop tables
         for l_table in (select *
                           from plsnap_Metadata
                          where idSnapshot = l_idSnapshot
-                           and ObjectType = 'TABLE'
+                           and ObjectType = gc_OBJTP_TABLE
                            and part = 1) loop
             l_tableName := getDataTableName(l_table.idMetadata);                
             for l_tableExists in (select * from user_tables where table_name = l_tableName) loop
@@ -1107,8 +1192,11 @@ create or replace package body plsnap_impl as
         delete from plsnap_Snapshot where name = a_snapshotName;
         commit;
         --
+        log('done');
+        --
     exception
         when others then
+            log('failed');
             reraise('Unexpected error in plsnap_impl.dropSnapshot');
     end;
 
@@ -1116,6 +1204,7 @@ create or replace package body plsnap_impl as
     procedure restoreFromSnapshot(a_snapshotName in plsnap_Snapshot.name%type) is
         lrec_Snapshot plsnap_Snapshot%rowtype;
     begin
+        log('Restoring from Snapshot=' || a_snapshotName);
         -- check that snapshot exists and is OK
         begin
             select * into lrec_Snapshot from plsnap_Snapshot where name = a_snapshotName;
@@ -1136,8 +1225,11 @@ create or replace package body plsnap_impl as
         -- recreate objects
         recreateObjects(lrec_Snapshot);
         --
+        log('done');
+        --
     exception
         when others then
+            log('failed');
             reraise('Unexpected error in plsnap_impl.restoreFromSnapshot');
     end;
 

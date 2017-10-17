@@ -1,5 +1,7 @@
 define l_schema_name = &1
 
+set feedback on
+
 prompt .. Granting privileges to package &&g_package_name in schema &&l_schema_name
 
 prompt .. Granting session to &&l_schema_name
@@ -43,6 +45,7 @@ grant create  any table to &&l_schema_name;
 grant drop    any table to &&l_schema_name;
 grant alter   any table to &&l_schema_name;
 grant select  any table to &&l_schema_name;
+grant insert  any table to &&l_schema_name;
 grant create  any view to &&l_schema_name;
 grant drop    any view to &&l_schema_name;
 grant create  any trigger to &&l_schema_name;
