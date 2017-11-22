@@ -96,6 +96,8 @@ select count(*) from scott.dept;
 
 # TODO
 
+- add snapshot size info
+- add some views for easier management
 - add tests
 - add some pretty outputs
 - add debug calls
