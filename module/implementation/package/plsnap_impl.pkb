@@ -1182,7 +1182,8 @@ create or replace package body plsnap_impl as
                           from plsnap_Metadata
                          where idSnapshot = l_idSnapshot
                            and ObjectType = gc_OBJTP_TABLE
-                           and part = 1) loop
+                           and PartType = gc_PARTTYPE_DATA
+                           and hasData = 'Y') loop
             l_tableName := getDataTableName(l_table.idMetadata);                
             for l_tableExists in (select * from user_tables where table_name = l_tableName) loop
                 execute immediate 'drop table ' || l_tableName || ' purge';
